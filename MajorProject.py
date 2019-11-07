@@ -1,15 +1,25 @@
 print('Start')
 print('Imported packages')
+#Imports for program
 from qgis.core import *
 from qgis.utils import *
 import processing
 import os
 
 print('Input Variables')
+#Variables required to make the program run
+#Directory for the program to run in
 strDir = 'C:/Users/ethan/Desktop/Uni/GEOM2159_Programming/Project/'
+#Your shapefile which will be the boundary and extent of the area of interest
 strVector = 'CrakerLakeNP.shp'
+#Your DEM file to use for heights
 strRaster = 'CraterLake_DEM.tif'
+#Number of Horizontal lines for your output
 intGrid = 80
+#The spacing for your points.
+#Large numbers smooths the model, smaller is more accurate
+#Be cautious with this depending on your shapefile extent
+intPoint = 100
 
 print('Change directory')
 os.chdir(strDir)
@@ -19,21 +29,21 @@ fileVector = QgsVectorLayer(strVector)
 fileRaster = QgsRasterLayer(strRaster)
 
 print('Calculate ProjectCRS')
+#Get Vector extent
 vectorExtent = fileVector.extent()
+#Find the centre
 centre = vectorExtent.center()
+#Convert to string
 crsCentre = str(centre.x())
+#Generate a new CRS from the centre of the desired extent using a Proj4 projection string
 crs = QgsCoordinateReferenceSystem('Proj4: +proj=sinu +lon_0=' + crsCentre + '+x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs')
-#crs = QgsCoordinateReferenceSystem('Proj4: +proj=sinu +lon_0=-122.13771565755209 +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs')
+#Create new project instance
 iface.newProject(False)
+#Set new instance to the new CRS
 QgsProject.instance().setCrs(crs)
-#iface.mapCanvas().setDestinationCrs(crs)
-
-print('Add layers to QGIS')
-iface.addRasterLayer(strRaster, 'CraterLake DEM')
-iface.addVectorLayer(strVector, '', 'ogr')
-#layerVector.setCrs(crs)
 
 print('Reproject Raster')
+#Reprojects the raster to the new CRS so other processes can runn correctly
 #processing.algorithmHelp('gdal:warpreproject')
 dctProjRast =  {'INPUT':fileRaster,
                 'SOURCE_CRS':fileRaster,
@@ -47,45 +57,54 @@ dctProjRast =  {'INPUT':fileRaster,
                 'TARGET_EXTENT_CRS':None,
                 'MULTIPLETHREADING':False,
                 'EXTRA':'',
-                'OUTPUT':'rasterReproject.tif'
+                'OUTPUT':'memory:ProjRast'
                 }
-processing.run('gdal:warpreproject', dctProjRast)
-iface.addRasterLayer('rasterReproject.tif', 'rasterReproject',)
+rasterReproject = processing.run('gdal:warpreproject', dctProjRast)['OUTPUT']
+#This is required to make the raster layer work in GRASS and SAGA
+ProjRast =  QgsRasterLayer(rasterReproject)
 
 print('Reproject Vector')
+#Reprojects the vector to the new CRS so the vector is in metres
 #processing.algorithmHelp('native:reprojectlayer')
 dctProjVect =  {'INPUT':strVector,
                 'TARGET_CRS':crs,
-                'OUTPUT':'vectorReproject.shp'
+                'OUTPUT':'memory:ProjVect'
                 }
-processing.run('native:reprojectlayer', dctProjVect)
-iface.addVectorLayer('vectorReproject.shp', '','ogr')
+vectorReproject = processing.run('native:reprojectlayer', dctProjVect)['OUTPUT']
 
-#print('Calculate Grid Extent')
-#vectorExtent = layerVector.extent()
-#width = vectorExtent.width()
-#height = vectorExtent.height()
-#print(width)
-#print(height)
+print('Calculate Grid Lines')
+#Get object extent
+vectorExtent = vectorReproject.extent()
+#Get extent width
+width = vectorExtent.width()
+#Get extent height
+height = vectorExtent.height()
+#Will generate 3 vertical lines due to this calc
+hspacing = height / 2
+#Will generate a number of horizontal lines equal to your input at start of program
+vspacing = width / intGrid
 
 print('Generate Grid')
+#Generate Grid in extent
 #processing.algorithmHelp('qgis:creategrid')
 dctGrid =  {'TYPE' : 1,
-            'EXTENT' : 'vectorReproject.shp',
-            'HSPACING' : 4400,
-            'VSPACING' : 440,
+            'EXTENT' : vectorReproject,
+            'HSPACING' : hspacing,
+            'VSPACING' : vspacing,
             'HOVERLAY' : 0,
             'VOVERLAY' : 0,
             'CRS' : crs,
-            'OUTPUT' : 'gridOutput.shp'
+            'OUTPUT' : 'memory:Grid'
             }
-outputGrid = processing.run('qgis:creategrid', dctGrid)
-#fileGrid = QgsVectorLayer('gridOutput.shp')
-fileGrid = iface.addVectorLayer('gridOutput.shp','','ogr')
+outputGrid = processing.run('qgis:creategrid', dctGrid)['OUTPUT']
 
 print('Delete Vertical Lines')
+#New list
 lstDelete = []
-gridLines = fileGrid.getFeatures()
+#Get features in grid file
+gridLines = outputGrid.getFeatures()
+#For each feature, get the id, left and right.
+#Append id to the empty list if left and right values are equal
 for feature in gridLines:
     fid = feature['id']
     left = feature['left']
@@ -93,52 +112,54 @@ for feature in gridLines:
     if left == right:
         lstDelete.append(fid)
 
-fileGrid.startEditing
-fileGrid.dataProvider().deleteFeatures(lstDelete)
-fileGrid.commitChanges
+#Edit file and delete all ids with same left and right using the list.
+outputGrid.startEditing
+outputGrid.dataProvider().deleteFeatures(lstDelete)
+outputGrid.commitChanges
 
 print('Clip Grid')
+#Clip grid based on the shapefile boundary
 #processing.algorithmHelp('native:clip')
-dctClip =  {'INPUT' : fileGrid,
-            'OVERLAY' : 'vectorReproject.shp',
-            'OUTPUT' : 'clipOutput.shp'
+dctClip =  {'INPUT' : outputGrid,
+            'OVERLAY' : vectorReproject,
+            'OUTPUT' : 'memory:Clip'
             }
-processing.run('native:clip', dctClip)
-fileClip = iface.addVectorLayer('clipOutput.shp', '','ogr')
-#fileClip = QgsVectorLayer('clipOutput.shp')
+outputClip = processing.run('native:clip', dctClip)['OUTPUT']
 
 print('Lines to Points')
+#All lines generate points spaced by input
 #processing.algorithmHelp('qgis:pointsalonglines')
-dctPointsLine =    {'INPUT': fileClip,
-                    'DISTANCE':100,
+dctPointsLine =    {'INPUT': outputClip,
+                    'DISTANCE':intPoint,
                     'START_OFFSET':0,
                     'END_OFFSET':0,
-                    'OUTPUT':'pointLineOutput.shp'
+                    'OUTPUT':'memory:PointsLine'
                     }
-processing.run('qgis:pointsalonglines', dctPointsLine)
-iface.addVectorLayer('pointLineOutput.shp', '','ogr')
+outputPoints = processing.run('qgis:pointsalonglines', dctPointsLine)['OUTPUT']
 
 print('Add Column')
+#Add a new column to the generated point file
 #processing.algorithmHelp('qgis:addfieldtoattributestable')
-dctNewField =  {'INPUT':'pointLineOutput.shp',
+dctNewField =  {'INPUT':outputPoints,
                 'FIELD_NAME':'Z',
                 'FIELD_TYPE':0,
                 'FIELD_LENGTH':24,
                 'FIELD_PRECISION':0,
-                'OUTPUT':'newFieldOutput.shp'
+                'OUTPUT':'memory:NewField'
                 }
-processing.run('qgis:addfieldtoattributestable',dctNewField)
-iface.addVectorLayer('newFieldOutput.shp', '','ogr')
+outputPointsT = processing.run('qgis:addfieldtoattributestable',dctNewField)['OUTPUT']
+#iface.addVectorLayer(outputPointsT, '','ogr')
 
 print('Point Heights')
+#Get point heights from the DEM
 #processing.algorithmHelp('grass7:v.what.rast')
-dctPointHeights =  {'map':'newFieldOutput.shp',
-                    'raster':'rasterReproject.tif',
+dctPointHeights =  {'map':outputPointsT,
+                    'raster':ProjRast,
                     'type':0,
                     'column':'Z',
                     'where':'',
                     '-i':True,
-                    'output':'pointHeightOutput.shp',
+                    'output':'memory:PointHeights',
                     'GRASS_REGION_PARAMETER':'',
                     'GRASS_REGION_CELLSIZE_PARAMETER':0,
                     'GRASS_SNAP_TOLERANCE_PARAMETER':-1,
@@ -148,13 +169,17 @@ dctPointHeights =  {'map':'newFieldOutput.shp',
                     'GRASS_VECTOR_LCO':'',
                     'GRASS_VECTOR_EXPORT_NOCAT':True
                     }
-processing.run('grass7:v.what.rast',dctPointHeights)
-iface.addVectorLayer('pointHeightOutput.shp', '','ogr')
+outputHeights = processing.run('grass7:v.what.rast',dctPointHeights)['output']
+pointHeights = QgsVectorLayer(outputHeights)
 
 print('Point Coords')
+#Get coordinates for all points using the CRS we generated
 #processing.algorithmHelp('saga:addcoordinatestopoints')
-dctPointCoords =   {'INPUT':'pointHeightOutput.shp',
-                    'OUTPUT':'pointXYZ.shp'
+dctPointCoords =   {'INPUT':pointHeights,
+                    'OUTPUT':'PointCoords.shp'
                     }
 processing.run('saga:addcoordinatestopoints',dctPointCoords)
-iface.addVectorLayer('pointXYZ.shp','','ogr')
+iface.addVectorLayer('PointCoords.shp','','OGR')
+
+#print('Point Layer to CSV')
+#QgsVectorFileWriter.writeAsVectorFormat(outputCoords,'pointXYZ.csv','UTF-8', driverName='CSV')
